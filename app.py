@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Lecture Video Generator — Gradio UI
-Run inside the lvm/ repo on Colab (or anywhere with CUDA + FFmpeg).
+Lecture Video Generator — Platform-agnostic Gradio UI
+Works on Google Colab, Lightning AI, local machines, or any CUDA + FFmpeg env.
 
 Usage:
-    python app.py              # serve on 0.0.0.0:9999 (for Ngrok/Cloudflare/etc.)
+    python app.py              # serve on 0.0.0.0:9999
     python app.py --share      # serve with Gradio share tunnel
 """
 
@@ -16,8 +16,8 @@ import subprocess
 import sys
 
 # Disable torch.compile entirely. VoxCPM uses it internally, but it breaks
-# in Gradio worker threads on Colab T4 because torch inductor CUDA graphs
-# rely on thread-local state that is absent outside the main thread.
+# in Gradio worker threads because torch inductor CUDA graphs rely on
+# thread-local state that is absent outside the main thread.
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
 
 import numpy as np
@@ -29,6 +29,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import gradio as gr
 from voxcpm import VoxCPM
 
+# ── Base directory ────────────────────────────────────────────────────────────
+# Resolve relative to this script so it works regardless of CWD.
+_BASE = os.path.dirname(os.path.abspath(__file__))
+
 # ── Config ────────────────────────────────────────────────────────────────────
 SAMPLE_RATE = 48_000
 GAP_BETWEEN_SEGMENTS = 0.3   # seconds of silence between sentences in a slide
@@ -36,9 +40,6 @@ GAP_BETWEEN_SLIDES = 1.0     # seconds of silence between slides
 VIDEO_FPS = 10
 AUDIO_BITRATE = "192k"
 
-# Resolve all paths absolutely so FFmpeg concat (which resolves relative to the
-# concat list file's directory) and worker threads always find the files.
-_BASE = os.path.abspath(os.getcwd())
 SLIDES_AUDIO_DIR = os.path.join(_BASE, "slides_audio")
 SLIDES_IMAGES_DIR = os.path.join(_BASE, "slides_images")
 SLIDES_VIDEO_DIR = os.path.join(_BASE, "slides_video")
@@ -46,12 +47,31 @@ AUDIO_OUTPUT = os.path.join(_BASE, "lecture.wav")
 VIDEO_OUTPUT = os.path.join(_BASE, "lecture.mp4")
 PREVIEW_OUTPUT = os.path.join(_BASE, "preview.mp4")
 
-DEFAULT_REF_WAV = "/content/vo/speaker.wav"
 DEFAULT_REF_TEXT = (
     "A string is defined as a sequence of characters, and it is important to "
     "remember that these are case sensitive. Strings can contain anything from "
     "standard alphabet letters, the special symbols, spaces and numerical digits."
 )
+
+
+def _find_default_ref_wav() -> str | None:
+    """Search for the default reference voice in common locations."""
+    candidates = []
+    env_path = os.environ.get("REF_VOICE_PATH")
+    if env_path:
+        candidates.append(env_path)
+    candidates.extend([
+        os.path.join(_BASE, "vo", "speaker.wav"),               # vo/ inside repo
+        os.path.join(os.path.dirname(_BASE), "vo", "speaker.wav"),  # sibling repo (Colab style)
+        "/content/vo/speaker.wav",                                 # legacy Colab
+    ])
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+DEFAULT_REF_WAV = _find_default_ref_wav()
 
 # ── Global state ──────────────────────────────────────────────────────────────
 model: VoxCPM | None = None
@@ -163,7 +183,7 @@ def save_reference(audio_file: str | None, text: str) -> str:
     if audio_file is None:
         return "⚠️ Please upload a reference audio file."
 
-    dest = "/content/ref_voice.wav"
+    dest = os.path.join(_BASE, "ref_voice.wav")
     shutil.copy(audio_file, dest)
     cached_ref_wav = dest
     cached_ref_text = text.strip() if text and text.strip() else DEFAULT_REF_TEXT
@@ -181,9 +201,13 @@ def get_ref_status() -> str:
             f"📎 Current reference: `{cached_ref_wav}` ({size_mb:.1f} MB)\n\n"
             f"**Transcript:** {cached_ref_text[:120]}{'…' if len(cached_ref_text) > 120 else ''}"
         )
-    if os.path.exists(DEFAULT_REF_WAV):
+    if DEFAULT_REF_WAV and os.path.exists(DEFAULT_REF_WAV):
         return f"📎 Using default reference: `{DEFAULT_REF_WAV}` (run *Save Reference* to override)."
-    return "⚠️ No reference voice found. Upload one below or clone the `vo` repo first."
+    return (
+        "⚠️ No reference voice found.\n\n"
+        "Upload one in the panel above, clone the `vo` repo into this directory, "
+        "or set the `REF_VOICE_PATH` environment variable."
+    )
 
 
 # ── Shared pipeline ───────────────────────────────────────────────────────────
@@ -202,11 +226,16 @@ def _run_pipeline(
 
     # Fallback to default reference
     if cached_ref_wav is None or not os.path.exists(cached_ref_wav):
-        if os.path.exists(DEFAULT_REF_WAV):
+        if DEFAULT_REF_WAV and os.path.exists(DEFAULT_REF_WAV):
             cached_ref_wav = DEFAULT_REF_WAV
             cached_ref_text = DEFAULT_REF_TEXT
         else:
-            yield None, None, "❌ Reference voice not available. Upload a custom one or clone the `vo` repo."
+            yield None, None, (
+                "❌ Reference voice not available.\n\n"
+                "Clone the `vo` repo (`git clone https://github.com/Mwimwii/vo.git`) "
+                "into the same folder as this repo, upload a custom voice above, "
+                "or set `REF_VOICE_PATH` to a .wav file."
+            )
             return
 
     if script_file is None:
@@ -231,8 +260,8 @@ def _run_pipeline(
 
     yield None, None, "📄 Loading script & converting PDF to images..."
 
-    script_path = "/content/script.json"
-    pdf_path = "/content/slides.pdf"
+    script_path = os.path.join(_BASE, "script.json")
+    pdf_path = os.path.join(_BASE, "slides.pdf")
     shutil.copy(script_file, script_path)
     shutil.copy(pdf_file, pdf_path)
 
@@ -271,7 +300,6 @@ def _run_pipeline(
         results.append((slide_num, slide_wav))
 
     if not is_preview:
-        # Concatenate full audio only for full mode
         results.sort(key=lambda x: int(x[0]))
         all_audio: list[np.ndarray] = []
         slide_silence = _silence(GAP_BETWEEN_SLIDES)
@@ -336,7 +364,8 @@ def _run_pipeline(
     os.remove(concat_list)
 
     if result.returncode != 0:
-        yield None, None, f"❌ FFmpeg concat failed:\n```\n{result.stderr[-400:]}\n```"
+        err = result.stderr[-400:].replace("`", "'")
+        yield None, None, f"❌ FFmpeg concat failed:\n```\n{err}\n```"
         return
 
     size_mb = os.path.getsize(video_out) / 1024 / 1024
@@ -510,7 +539,7 @@ def main() -> None:
         print("Launching with Gradio share link...")
         demo.launch(share=True)
     else:
-        print("Launching on 0.0.0.0:9999 (use Ngrok/Cloudflare/LocalTunnel/Horizon to expose)")
+        print("Launching on 0.0.0.0:9999 (use a tunnel to expose publicly)")
         demo.launch(server_name="0.0.0.0", server_port=9999)
 
 
