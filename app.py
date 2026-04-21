@@ -36,11 +36,15 @@ GAP_BETWEEN_SLIDES = 1.0     # seconds of silence between slides
 VIDEO_FPS = 10
 AUDIO_BITRATE = "192k"
 
-SLIDES_AUDIO_DIR = "slides_audio"
-SLIDES_IMAGES_DIR = "slides_images"
-SLIDES_VIDEO_DIR = "slides_video"
-AUDIO_OUTPUT = "lecture.wav"
-VIDEO_OUTPUT = "lecture.mp4"
+# Resolve all paths absolutely so FFmpeg concat (which resolves relative to the
+# concat list file's directory) and worker threads always find the files.
+_BASE = os.path.abspath(os.getcwd())
+SLIDES_AUDIO_DIR = os.path.join(_BASE, "slides_audio")
+SLIDES_IMAGES_DIR = os.path.join(_BASE, "slides_images")
+SLIDES_VIDEO_DIR = os.path.join(_BASE, "slides_video")
+AUDIO_OUTPUT = os.path.join(_BASE, "lecture.wav")
+VIDEO_OUTPUT = os.path.join(_BASE, "lecture.mp4")
+PREVIEW_OUTPUT = os.path.join(_BASE, "preview.mp4")
 
 DEFAULT_REF_WAV = "/content/vo/speaker.wav"
 DEFAULT_REF_TEXT = (
@@ -90,19 +94,20 @@ def _generate_segment(text: str, cfg: float, timesteps: int) -> np.ndarray:
     )
 
 
-def _pdf_to_images(pdf_path: str) -> int:
+def _pdf_to_images(pdf_path: str, max_pages: int | None = None) -> int:
     _clear_dir(SLIDES_IMAGES_DIR, ".png")
     doc = fitz.open(pdf_path)
-    for page_num in range(len(doc)):
+    total = len(doc)
+    end = min(total, max_pages) if max_pages else total
+    for page_num in range(end):
         slide_num = page_num + 1
         page = doc[page_num]
         mat = fitz.Matrix(2.0, 2.0)
         pix = page.get_pixmap(matrix=mat)
         out_path = os.path.join(SLIDES_IMAGES_DIR, f"slide_{str(slide_num).zfill(3)}.png")
         pix.save(out_path)
-    count = len(doc)
     doc.close()
-    return count
+    return end
 
 
 def _process_slide_audio(
@@ -181,14 +186,16 @@ def get_ref_status() -> str:
     return "⚠️ No reference voice found. Upload one below or clone the `vo` repo first."
 
 
-# ── Main generation handler ───────────────────────────────────────────────────
-def generate_lecture(
+# ── Shared pipeline ───────────────────────────────────────────────────────────
+def _run_pipeline(
     script_file: str | None,
     pdf_file: str | None,
     cfg: float,
     timesteps: int,
     video_height: int,
     clear_assets: bool,
+    preview_start: int | None,
+    preview_end: int | None,
     progress: gr.Progress = gr.Progress(),
 ):
     global cached_ref_wav, cached_ref_text
@@ -210,13 +217,16 @@ def generate_lecture(
         return
 
     _ensure_dirs()
+    is_preview = preview_start is not None and preview_end is not None
+    video_out = PREVIEW_OUTPUT if is_preview else VIDEO_OUTPUT
+    audio_out = None if is_preview else AUDIO_OUTPUT
 
     if clear_assets:
         _clear_dir(SLIDES_AUDIO_DIR, ".wav")
         _clear_dir(SLIDES_IMAGES_DIR, ".png")
         _clear_dir(SLIDES_VIDEO_DIR, ".mp4")
-        for f in (AUDIO_OUTPUT, VIDEO_OUTPUT):
-            if os.path.exists(f):
+        for f in (AUDIO_OUTPUT, VIDEO_OUTPUT, PREVIEW_OUTPUT):
+            if f and os.path.exists(f):
                 os.remove(f)
 
     yield None, None, "📄 Loading script & converting PDF to images..."
@@ -228,16 +238,26 @@ def generate_lecture(
 
     with open(script_path) as f:
         script: dict[str, list[str]] = json.load(f)
-    slide_keys = sorted(script.keys(), key=lambda k: int(k))
+    all_slide_keys = sorted(script.keys(), key=lambda k: int(k))
+
+    if is_preview:
+        slide_keys = [k for k in all_slide_keys if preview_start <= int(k) <= preview_end]
+        if not slide_keys:
+            yield None, None, f"⚠️ No slides found within preview range ({preview_start}–{preview_end})."
+            return
+    else:
+        slide_keys = all_slide_keys
+
     total_slides = len(slide_keys)
     total_segments = sum(len(script[k]) for k in slide_keys)
 
-    num_pages = _pdf_to_images(pdf_path)
+    num_pages = _pdf_to_images(pdf_path, max_pages=preview_end if is_preview else None)
 
+    mode_label = "Preview" if is_preview else "Full"
     yield (
         None,
         None,
-        f"🖼️ PDF: **{num_pages}** pages | Script: **{total_slides}** slides | "
+        f"🖼️ PDF: **{num_pages}** pages | {mode_label}: **{total_slides}** slides | "
         f"Segments: **{total_segments}**\n\n🔊 Generating audio...",
     )
 
@@ -250,14 +270,15 @@ def generate_lecture(
         _, slide_wav = _process_slide_audio(slide_num, segments, cfg, timesteps, progress, total_segments, done_counter)
         results.append((slide_num, slide_wav))
 
-    # Concatenate full audio
-    results.sort(key=lambda x: int(x[0]))
-    all_audio: list[np.ndarray] = []
-    slide_silence = _silence(GAP_BETWEEN_SLIDES)
-    for _, slide_wav in results:
-        all_audio.extend([slide_wav, slide_silence])
-    full_audio = np.concatenate(all_audio)
-    sf.write(AUDIO_OUTPUT, full_audio, SAMPLE_RATE)
+    if not is_preview:
+        # Concatenate full audio only for full mode
+        results.sort(key=lambda x: int(x[0]))
+        all_audio: list[np.ndarray] = []
+        slide_silence = _silence(GAP_BETWEEN_SLIDES)
+        for _, slide_wav in results:
+            all_audio.extend([slide_wav, slide_silence])
+        full_audio = np.concatenate(all_audio)
+        sf.write(AUDIO_OUTPUT, full_audio, SAMPLE_RATE)
 
     yield None, None, f"🎬 Audio complete. Assembling **{len(results)}** video clips with FFmpeg..."
 
@@ -299,17 +320,17 @@ def generate_lecture(
     successful = sorted([r for r in clip_results if r is not None], key=lambda x: x[0])
     clip_paths = [path for _, path in successful]
 
-    yield None, None, f"🎞️ **{len(clip_paths)}** clips ready. Concatenating final lecture.mp4..."
+    yield None, None, f"🎞️ **{len(clip_paths)}** clips ready. Concatenating final {mode_label.lower()}.mp4..."
 
     # ── Final concat ──
-    concat_list = "/content/concat_list.txt"
+    concat_list = os.path.join(_BASE, "concat_list.txt")
     with open(concat_list, "w") as f:
         for clip in clip_paths:
-            f.write(f"file '{clip}'\n")
+            f.write(f"file '{os.path.abspath(clip)}'\n")
 
     cmd = [
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-        "-i", concat_list, "-c", "copy", VIDEO_OUTPUT,
+        "-i", concat_list, "-c", "copy", video_out,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     os.remove(concat_list)
@@ -318,14 +339,36 @@ def generate_lecture(
         yield None, None, f"❌ FFmpeg concat failed:\n```\n{result.stderr[-400:]}\n```"
         return
 
-    size_mb = os.path.getsize(VIDEO_OUTPUT) / 1024 / 1024
-    yield (
-        VIDEO_OUTPUT,
-        AUDIO_OUTPUT,
-        f"✅ **Done!**\n\n"
-        f"📹 `{VIDEO_OUTPUT}` — **{size_mb:.1f} MB**\n"
-        f"🔊 `{AUDIO_OUTPUT}` — full audio track",
-    )
+    size_mb = os.path.getsize(video_out) / 1024 / 1024
+    if is_preview:
+        yield (
+            video_out,
+            None,
+            f"✅ **Preview done!**\n\n"
+            f"📹 `{video_out}` — **{size_mb:.1f} MB**\n"
+            f"Slides {preview_start}–{preview_end} rendered.",
+        )
+    else:
+        yield (
+            video_out,
+            audio_out,
+            f"✅ **Done!**\n\n"
+            f"📹 `{video_out}` — **{size_mb:.1f} MB**\n"
+            f"🔊 `{audio_out}` — full audio track",
+        )
+
+
+# ── Wrapper handlers ──────────────────────────────────────────────────────────
+def generate_lecture(
+    script_file, pdf_file, cfg, timesteps, video_height, clear_assets, progress=gr.Progress(),
+):
+    yield from _run_pipeline(script_file, pdf_file, cfg, timesteps, video_height, clear_assets, preview_start=None, preview_end=None, progress=progress)
+
+
+def generate_preview(
+    script_file, pdf_file, cfg, timesteps, video_height, clear_assets, preview_start, preview_end, progress=gr.Progress(),
+):
+    yield from _run_pipeline(script_file, pdf_file, cfg, timesteps, video_height, clear_assets, preview_start=preview_start, preview_end=preview_end, progress=progress)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -384,17 +427,34 @@ def build_ui() -> gr.Blocks:
                 value=720,
                 label="Video Height (px)",
             )
-        clear_checkbox = gr.Checkbox(
-            value=True,
-            label="Clear previous assets before generation",
-        )
+        with gr.Row():
+            clear_checkbox = gr.Checkbox(
+                value=True,
+                label="Clear previous assets before generation",
+            )
+            preview_start = gr.Number(
+                value=1,
+                minimum=1,
+                step=1,
+                label="Preview start slide",
+                info="First slide to include in preview.",
+            )
+            preview_end = gr.Number(
+                value=3,
+                minimum=1,
+                step=1,
+                label="Preview end slide",
+                info="Last slide to include in preview.",
+            )
 
-        generate_btn = gr.Button("🚀 Generate Lecture Video", variant="primary")
+        with gr.Row():
+            generate_btn = gr.Button("🚀 Generate Lecture Video", variant="primary")
+            preview_btn = gr.Button("👁️ Quick Preview", variant="secondary")
 
         # ── Outputs ──
         gr.Markdown("## 📥 Outputs")
         with gr.Row():
-            output_video = gr.Video(label="lecture.mp4")
+            output_video = gr.Video(label="Output video")
             output_audio = gr.Audio(label="lecture.wav", type="filepath")
         status_md = gr.Markdown("*Status will appear here...*")
 
@@ -407,6 +467,22 @@ def build_ui() -> gr.Blocks:
                 timesteps_slider,
                 video_height,
                 clear_checkbox,
+            ],
+            outputs=[output_video, output_audio, status_md],
+            show_progress="minimal",
+        )
+
+        preview_btn.click(
+            fn=generate_preview,
+            inputs=[
+                script_input,
+                pdf_input,
+                cfg_slider,
+                timesteps_slider,
+                video_height,
+                clear_checkbox,
+                preview_start,
+                preview_end,
             ],
             outputs=[output_video, output_audio, status_md],
             show_progress="minimal",
