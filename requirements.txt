@@ -1,0 +1,6 @@
+voxcpm
+soundfile
+numpy
+pymupdf
+gradio
+torch
