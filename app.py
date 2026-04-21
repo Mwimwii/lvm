@@ -15,17 +15,16 @@ import shutil
 import subprocess
 import sys
 
+# Disable torch.compile entirely. VoxCPM uses it internally, but it breaks
+# in Gradio worker threads on Colab T4 because torch inductor CUDA graphs
+# rely on thread-local state that is absent outside the main thread.
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
 import numpy as np
 import soundfile as sf
 import fitz  # PyMuPDF
 import torch
 from concurrent.futures import ThreadPoolExecutor
-
-# Disable torch inductor CUDA graphs — breaks in Gradio worker threads on T4
-if hasattr(torch, "_inductor") and hasattr(torch._inductor, "config"):
-    torch._inductor.config.triton.cudagraphs = False
-if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "config"):
-    torch._dynamo.config.suppress_errors = True
 
 import gradio as gr
 from voxcpm import VoxCPM
