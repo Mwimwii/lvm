@@ -21,6 +21,12 @@ import fitz  # PyMuPDF
 import torch
 from concurrent.futures import ThreadPoolExecutor
 
+# Disable torch inductor CUDA graphs — breaks in Gradio worker threads on T4
+if hasattr(torch, "_inductor") and hasattr(torch._inductor, "config"):
+    torch._inductor.config.triton.cudagraphs = False
+if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "config"):
+    torch._dynamo.config.suppress_errors = True
+
 import gradio as gr
 from voxcpm import VoxCPM
 
