@@ -24,7 +24,7 @@ import numpy as np
 import soundfile as sf
 import fitz  # PyMuPDF
 import torch
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import gradio as gr
 from voxcpm import VoxCPM
@@ -286,8 +286,15 @@ def generate_lecture(
         ))
 
     _clear_dir(SLIDES_VIDEO_DIR, ".mp4")
+    clip_results: list[tuple[int, str] | None] = []
     with ThreadPoolExecutor(max_workers=4) as executor:
-        clip_results = list(executor.map(_make_slide_clip_worker, tasks))
+        futures = {executor.submit(_make_slide_clip_worker, t): t[0] for t in tasks}
+        for future in as_completed(futures):
+            result = future.result()
+            num = futures[future]
+            if result:
+                clip_results.append(result)
+            yield None, None, f"🎞️ Rendering clip {len(clip_results)}/{len(tasks)}  (slide {num})..."
 
     successful = sorted([r for r in clip_results if r is not None], key=lambda x: x[0])
     clip_paths = [path for _, path in successful]
