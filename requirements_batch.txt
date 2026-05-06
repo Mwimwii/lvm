@@ -1,0 +1,7 @@
+nanovllm-voxcpm
+Pillow
+soundfile
+numpy
+PyMuPDF==1.23.25 # or a version compatible with your environment
+torch # ensure this matches your CUDA setup
+lightning-sdk

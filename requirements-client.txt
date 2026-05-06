@@ -1,0 +1,4 @@
+gradio
+lightning-sdk
+boto3
+python-dotenv
