@@ -8,7 +8,10 @@ FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/app/hf_cache \
-    HF_HUB_ENABLE_HF_TRANSFER=1
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    CUDA_HOME=/usr/local/cuda \
+    MAX_JOBS=4 \
+    TORCH_CUDA_ARCH_LIST="8.9"
 
 WORKDIR /app
 
@@ -27,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Python deps ──────────────────────────────────────────────────────────
 RUN pip install --no-cache-dir \
     torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
+    && pip install --no-cache-dir ninja packaging \
     && pip install --no-cache-dir \
     flash-attn --no-build-isolation \
     && pip install --no-cache-dir \
