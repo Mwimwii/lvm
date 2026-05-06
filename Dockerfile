@@ -28,7 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir \
     torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
     && pip install --no-cache-dir \
-    nano-vllm-voxcpm \
+    flash-attn --no-build-isolation \
+    && pip install --no-cache-dir \
+    git+https://github.com/a710128/nanovllm-voxcpm.git \
     soundfile \
     numpy \
     pymupdf \
