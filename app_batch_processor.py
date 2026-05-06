@@ -308,9 +308,13 @@ def main() -> None:
     print(f"CUDA: {torch.cuda.get_device_name(0)}")
     print("Loading nanovllm VoxCPM server...")
 
+    _local_model = "/app/hf_cache/VoxCPM2"
+    _model_path = _local_model if os.path.isdir(_local_model) else "openbmb/VoxCPM2"
+    print(f"Model path: {_model_path}")
+
     global server
     server = VoxCPM.from_pretrained(
-        model="openbmb/VoxCPM2",
+        model=_model_path,
         devices=[0],
         max_num_batched_tokens=8192,
         max_num_seqs=16,
