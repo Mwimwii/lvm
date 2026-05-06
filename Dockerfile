@@ -3,7 +3,7 @@
 # Pre-bakes all deps and the VoxCPM2 model to eliminate cold starts.
 # ─────────────────────────────────────────────────────────────────────────
 
-FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -17,20 +17,15 @@ WORKDIR /app
 
 # ── System deps ──────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 python3.10-dev python3-pip \
     ffmpeg \
     libsndfile1-dev \
     libgl1-mesa-glx \
     git \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
-    && python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+    && rm -rf /var/lib/apt/lists/*
 
 # ── Python deps ──────────────────────────────────────────────────────────
-RUN pip install --no-cache-dir \
-    torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
-    && pip install --no-cache-dir ninja packaging \
+RUN pip install --no-cache-dir ninja packaging \
     && pip install --no-cache-dir \
     flash-attn --no-build-isolation \
     && pip install --no-cache-dir \
