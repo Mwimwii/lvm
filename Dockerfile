@@ -36,12 +36,12 @@ RUN pip install --no-cache-dir ninja packaging \
     boto3 \
     botocore
 
-# ── Pre-download VoxCPM2 model (~5 GB) ───────────────────────────────────
+# ── Pre-download VoxCPM2 model (~5 GB) via huggingface_hub (no GPU needed) ──
 RUN python -c "\
-from nanovllm_voxcpm import VoxCPM; \
+from huggingface_hub import snapshot_download; \
 print('Downloading VoxCPM2 model...'); \
-server = VoxCPM.from_pretrained('openbmb/VoxCPM2', devices=[0]); \
-print('Model cached successfully.') \
+snapshot_download('openbmb/VoxCPM2', local_dir='/app/hf_cache/VoxCPM2'); \
+print('Done.') \
 "
 
 # ── Embed batch processor + bootstrap ────────────────────────────────────
