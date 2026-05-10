@@ -25,10 +25,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python deps ──────────────────────────────────────────────────────────
-RUN pip install --no-cache-dir ninja packaging \
-    && pip install --no-cache-dir \
-    flash-attn --no-build-isolation \
-    && pip install --no-cache-dir \
+# Install torch first (already in base image, but ensure it's in env)
+RUN pip install --no-cache-dir ninja packaging wheel
+
+# Install flash-attn with torch available in build environment
+RUN pip install --no-cache-dir flash-attn --no-build-isolation \
+    && python -c "import flash_attn; print(f'flash-attn {flash_attn.__version__} installed OK')"
+
+# Install remaining deps
+RUN pip install --no-cache-dir \
     git+https://github.com/a710128/nanovllm-voxcpm.git \
     soundfile \
     numpy \
