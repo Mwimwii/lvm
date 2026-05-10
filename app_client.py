@@ -167,6 +167,7 @@ def submit_job(script_file, pdf_file, ref_audio, ref_text, cfg, timesteps, video
             image=DOCKER_IMAGE,
             command="python /app/bootstrap.py",
             teamspace=TEAMSPACE,
+            user="mpnyirongo",
             env=env,
             interruptible=True,
         )
