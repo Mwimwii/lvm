@@ -19,7 +19,7 @@ from botocore.config import Config as BotoConfig
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(_BASE, "client_jobs")
-DOCKER_IMAGE = "mwimwii/lvm-processor:latest"
+DOCKER_IMAGE = "mpnyirongo/lvm-processor:latest"
 TEAMSPACE = "language-model"
 R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY_ID", "")
 R2_SECRET_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")

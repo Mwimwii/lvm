@@ -51,13 +51,13 @@ The Docker image pre-bakes CUDA, Python, FFmpeg, all pip deps, and the VoxCPM2 m
 cd lvm
 
 # Build (takes ~15-20 min, image ~10 GB)
-docker build -t mwimwii/lvm-processor:latest .
+docker build -t mpnyirongo/lvm-processor:latest .
 
 # Login to Docker Hub (create account at hub.docker.com if needed)
 docker login
 
 # Push
-docker push mwimwii/lvm-processor:latest
+docker push mpnyirongo/lvm-processor:latest
 ```
 
 **Option B: Build on your Lightning AI Studio**
@@ -70,9 +70,9 @@ sudo apt-get update && sudo apt-get install -y docker.io
 sudo usermod -aG docker $USER
 # Re-login, then:
 cd ~/lvm
-docker build -t mwimwii/lvm-processor:latest .
+docker build -t mpnyirongo/lvm-processor:latest .
 docker login
-docker push mwimwii/lvm-processor:latest
+docker push mpnyirongo/lvm-processor:latest
 ```
 
 ### Setup
