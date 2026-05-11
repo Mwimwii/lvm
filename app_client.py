@@ -80,6 +80,16 @@ def _download_from_r2(r2_key, local_path):
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
     _get_r2().download_file(R2_BUCKET, r2_key, local_path)
 
+def _r2_presigned_url(r2_key, expires=604800):
+    """Return a public presigned URL for an R2 object (default 7 days)."""
+    try:
+        url = _get_r2().generate_presigned_url(
+            "get_object", Params={"Bucket": R2_BUCKET, "Key": r2_key}, ExpiresIn=expires
+        )
+        return url
+    except Exception as e:
+        return f"(presign failed: {e})"
+
 def _prepare_job_dir(job_id):
     d = os.path.join(JOBS_DIR, job_id)
     os.makedirs(d, exist_ok=True)
@@ -318,61 +328,66 @@ def submit_all_jobs(queue, progress=gr.Progress()):
         yield queue, _render_queue(queue), None, _log("All jobs already processed.")
         return
 
-    _log(f"Batch: {len(pending)} jobs to submit (of {total} total)")
+    _log(f"Sequential batch: {len(pending)} jobs to run one-at-a-time (saves cost)")
+    poll_interval = 30
+    max_wait = 3600  # 1 hour per job
 
-    # Phase 1: upload + submit each pending job
-    for i, item in enumerate(pending, 1):
-        progress((i - 1) / (len(pending) * 2), desc=f"Submitting {item['name']} ({i}/{len(pending)})")
+    for idx, item in enumerate(pending, 1):
+        _log(f"\n--- [{idx}/{len(pending)}] Starting {item['name']} ---")
         item["status"] = "uploading"
         ok, msg = _upload_and_submit_item(item)
         _log(msg)
-        item["status"] = "submitted" if ok else "failed"
+        if not ok:
+            item["status"] = "failed"
+            yield queue, _render_queue(queue), None, msg
+            continue
+
+        item["status"] = "running"
         yield queue, _render_queue(queue), None, msg
 
-    submitted = [item for item in queue if item["status"] == "submitted"]
-    _log(f"All uploads done. {len(submitted)} running, polling every 30s...")
-
-    # Phase 2: poll all submitted jobs
-    poll_interval = 30
-    max_wait = 3600 * 3  # 3 hours for batch
-    waited = 0
-    done_names = []
-
-    while waited < max_wait and submitted:
-        time.sleep(poll_interval)
-        waited += poll_interval
-
-        remaining = []
-        for item in submitted:
+        # Poll this single job until done
+        waited = 0
+        done = False
+        while waited < max_wait and not done:
+            time.sleep(poll_interval)
+            waited += poll_interval
             out_keys = _r2_list(f"jobs/{item['job_id']}/output/")
             if any(k.endswith(".mp4") for k in out_keys):
+                # Download outputs
                 local_job_dir = _prepare_job_dir(item["job_id"])
                 local_out = os.path.join(local_job_dir, "output")
                 os.makedirs(local_out, exist_ok=True)
                 for k in out_keys:
                     _download_from_r2(k, os.path.join(local_out, os.path.basename(k)))
+                # Generate presigned URL for the MP4
+                mp4_key = next((k for k in out_keys if k.endswith(".mp4")), None)
+                if mp4_key:
+                    url = _r2_presigned_url(mp4_key)
+                    item["public_url"] = url
+                    _log(f"Public link: {url}")
                 item["status"] = "done"
-                done_names.append(item["name"])
                 _log(f"Done: {item['name']}")
+                done = True
             else:
-                remaining.append(item)
+                minutes = waited // 60
+                progress(idx / total, desc=f"Job {idx}/{total} running ({minutes}m)")
+                status_msg = f"Poll {waited//30}: waiting for {item['name']}"
+                _log(status_msg)
+                yield queue, _render_queue(queue), None, status_msg
 
-        submitted = remaining
-        done_count = sum(1 for i in queue if i["status"] == "done")
-        failed_count = sum(1 for i in queue if i["status"] == "failed")
-        progress(0.5 + (0.5 * done_count / total), desc=f"Done {done_count}/{total}")
-        status_msg = f"Poll {waited//30}: done={done_count}, failed={failed_count}, running={len(submitted)}"
-        _log(status_msg)
-        yield queue, _render_queue(queue), None, status_msg
+        if not done:
+            item["status"] = "timed out"
+            _log(f"Timed out: {item['name']}")
 
-        if not remaining:
-            break
-
-    done = sum(1 for i in queue if i["status"] == "done")
-    failed = sum(1 for i in queue if i["status"] == "failed")
-    timed_out = sum(1 for i in queue if i["status"] == "submitted")
-    summary = f"Batch complete: {done} done, {failed} failed, {timed_out} timed out"
+    done_count = sum(1 for i in queue if i["status"] == "done")
+    failed_count = sum(1 for i in queue if i["status"] == "failed")
+    timed_out_count = sum(1 for i in queue if i["status"] == "timed out")
+    summary = f"Batch complete: {done_count} done, {failed_count} failed, {timed_out_count} timed out"
     _log(summary)
+    # Collect all public URLs
+    urls = [f"- **{i['name']}**: [{i.get('public_url', 'n/a')[:60]}...]({i.get('public_url', '#')})" for i in queue if 'public_url' in i]
+    if urls:
+        _log("\n### Public Links\n" + "\n".join(urls))
     yield queue, _render_queue(queue), None, summary
 
 
