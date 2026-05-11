@@ -85,6 +85,100 @@ def _prepare_job_dir(job_id):
     os.makedirs(d, exist_ok=True)
     return d
 
+# ── Batch queue helpers ───────────────────────────────────────────────────────
+def _render_queue(queue):
+    if not queue:
+        return "Queue is empty."
+    lines = ["| # | Name | Job ID | Status |", "|---|---|---|---|"]
+    for i, item in enumerate(queue, 1):
+        lines.append(f"| {i} | {item['name']} | `{item['job_id']}` | {item['status']} |")
+    return "\n".join(lines)
+
+def _upload_and_submit_item(item):
+    """Upload one queued item to R2 and submit Lightning job. Returns (ok, msg)."""
+    job_id = item["job_id"]
+    job_dir = _prepare_job_dir(job_id)
+
+    shutil.copy(item["script_file"], os.path.join(job_dir, "script.json"))
+    shutil.copy(item["pdf_file"], os.path.join(job_dir, "slides.pdf"))
+    if item["ref_audio"] is not None:
+        shutil.copy(item["ref_audio"], os.path.join(job_dir, "ref_voice.wav"))
+
+    manifest = {
+        "job_id": job_id,
+        "cfg": item["cfg"],
+        "timesteps": item["timesteps"],
+        "video_height": item["video_height"],
+        "clear_assets": item["clear_assets"],
+        "preview_start": item["preview_start"],
+        "preview_end": item["preview_end"],
+        "ref_text": item["ref_text"],
+        "output_name": item["name"],
+        "r2_bucket": R2_BUCKET,
+    }
+    with open(os.path.join(job_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    try:
+        _upload_to_r2(os.path.join(job_dir, "script.json"), _r2_key(job_id, "inputs/script.json"))
+        _upload_to_r2(os.path.join(job_dir, "slides.pdf"), _r2_key(job_id, "inputs/slides.pdf"))
+        _upload_to_r2(os.path.join(job_dir, "manifest.json"), _r2_key(job_id, "inputs/manifest.json"))
+        batch_src = os.path.join(_BASE, "app_batch_processor.py")
+        bootstrap_src = os.path.join(_BASE, "app_r2_bootstrap.py")
+        if os.path.exists(batch_src):
+            _upload_to_r2(batch_src, _r2_key(job_id, "batch.py"))
+        if os.path.exists(bootstrap_src):
+            _upload_to_r2(bootstrap_src, _r2_key(job_id, "bootstrap.py"))
+        if os.path.exists(os.path.join(job_dir, "ref_voice.wav")):
+            _upload_to_r2(os.path.join(job_dir, "ref_voice.wav"), _r2_key(job_id, "inputs/ref_voice.wav"))
+    except Exception as e:
+        return False, f"Job {job_id} upload failed: {e}"
+
+    env = {
+        "R2_ACCESS_KEY_ID": R2_ACCESS_KEY,
+        "R2_SECRET_ACCESS_KEY": R2_SECRET_KEY,
+        "R2_ENDPOINT_URL": R2_ENDPOINT,
+        "R2_BUCKET_NAME": R2_BUCKET,
+        "JOB_ID": job_id,
+    }
+    try:
+        Job.run(
+            name=job_id,
+            machine=Machine.L40S,
+            image=DOCKER_IMAGE,
+            command="python /app/bootstrap.py",
+            teamspace=TEAMSPACE,
+            user="mpnyirongo",
+            env=env,
+            interruptible=True,
+        )
+        return True, f"Job {job_id} submitted OK."
+    except Exception as e:
+        return False, f"Job {job_id} submit failed: {e}"
+
+def add_to_queue(queue, script_file, pdf_file, ref_audio, ref_text, cfg, timesteps,
+                 video_height, clear_assets, preview_mode, preview_start,
+                 preview_end, output_name):
+    queue = queue or []
+    job_id = f"job_{uuid.uuid4().hex[:8]}"
+    item = {
+        "job_id": job_id,
+        "name": (output_name.strip() if output_name else f"lecture_{len(queue)+1}"),
+        "script_file": script_file, "pdf_file": pdf_file,
+        "ref_audio": ref_audio, "ref_text": ref_text.strip() if ref_text else "",
+        "cfg": cfg, "timesteps": timesteps, "video_height": video_height,
+        "clear_assets": clear_assets,
+        "preview_start": int(preview_start) if preview_mode and preview_start else None,
+        "preview_end": int(preview_end) if preview_mode and preview_end else None,
+        "status": "pending",
+    }
+    queue.append(item)
+    return queue, _render_queue(queue), _log(f"Added `{item['name']}` to queue (total: {len(queue)})")
+
+def clear_queue(queue):
+    queue = []
+    return queue, _render_queue(queue), _log("Queue cleared.")
+
 def submit_job(script_file, pdf_file, ref_audio, ref_text, cfg, timesteps, video_height, clear_assets,
                preview_mode, preview_start, preview_end, output_name, progress=gr.Progress()):
     _clear_log()
@@ -212,6 +306,76 @@ def submit_job(script_file, pdf_file, ref_audio, ref_text, cfg, timesteps, video
     yield None, _log(f"Timed out after {max_wait//60}m")
 
 
+def submit_all_jobs(queue, progress=gr.Progress()):
+    _clear_log()
+    if not queue:
+        yield queue, _render_queue(queue), None, _log("Queue is empty. Add jobs first.")
+        return
+
+    total = len(queue)
+    pending = [item for item in queue if item["status"] == "pending"]
+    if not pending:
+        yield queue, _render_queue(queue), None, _log("All jobs already processed.")
+        return
+
+    _log(f"Batch: {len(pending)} jobs to submit (of {total} total)")
+
+    # Phase 1: upload + submit each pending job
+    for i, item in enumerate(pending, 1):
+        progress((i - 1) / (len(pending) * 2), desc=f"Submitting {item['name']} ({i}/{len(pending)})")
+        item["status"] = "uploading"
+        ok, msg = _upload_and_submit_item(item)
+        _log(msg)
+        item["status"] = "submitted" if ok else "failed"
+        yield queue, _render_queue(queue), None, msg
+
+    submitted = [item for item in queue if item["status"] == "submitted"]
+    _log(f"All uploads done. {len(submitted)} running, polling every 30s...")
+
+    # Phase 2: poll all submitted jobs
+    poll_interval = 30
+    max_wait = 3600 * 3  # 3 hours for batch
+    waited = 0
+    done_names = []
+
+    while waited < max_wait and submitted:
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+        remaining = []
+        for item in submitted:
+            out_keys = _r2_list(f"jobs/{item['job_id']}/output/")
+            if any(k.endswith(".mp4") for k in out_keys):
+                local_job_dir = _prepare_job_dir(item["job_id"])
+                local_out = os.path.join(local_job_dir, "output")
+                os.makedirs(local_out, exist_ok=True)
+                for k in out_keys:
+                    _download_from_r2(k, os.path.join(local_out, os.path.basename(k)))
+                item["status"] = "done"
+                done_names.append(item["name"])
+                _log(f"Done: {item['name']}")
+            else:
+                remaining.append(item)
+
+        submitted = remaining
+        done_count = sum(1 for i in queue if i["status"] == "done")
+        failed_count = sum(1 for i in queue if i["status"] == "failed")
+        progress(0.5 + (0.5 * done_count / total), desc=f"Done {done_count}/{total}")
+        status_msg = f"Poll {waited//30}: done={done_count}, failed={failed_count}, running={len(submitted)}"
+        _log(status_msg)
+        yield queue, _render_queue(queue), None, status_msg
+
+        if not remaining:
+            break
+
+    done = sum(1 for i in queue if i["status"] == "done")
+    failed = sum(1 for i in queue if i["status"] == "failed")
+    timed_out = sum(1 for i in queue if i["status"] == "submitted")
+    summary = f"Batch complete: {done} done, {failed} failed, {timed_out} timed out"
+    _log(summary)
+    yield queue, _render_queue(queue), None, summary
+
+
 def check_or_resume_job(job_id_input, progress=gr.Progress()):
     job_id = job_id_input.strip()
     if not job_id:
@@ -271,6 +435,16 @@ def build_ui():
 
         submit_btn = gr.Button("Submit L40S Job", variant="primary")
 
+        # ── Batch Queue ──────────────────────────────────────────────────────
+        gr.Markdown("---")
+        gr.Markdown("## Batch Queue")
+        queue_state = gr.State(value=[])
+        queue_md = gr.Markdown("Queue is empty.")
+        with gr.Row():
+            add_queue_btn = gr.Button("Add Current Job to Queue", variant="secondary")
+            clear_queue_btn = gr.Button("Clear Queue", variant="secondary")
+        submit_all_btn = gr.Button("Submit All Jobs", variant="primary")
+
         gr.Markdown("## Resume / Check Previous Job")
         with gr.Row():
             job_id_input = gr.Textbox(label="Job ID", placeholder="e.g., job_a1b2c3d4")
@@ -285,6 +459,23 @@ def build_ui():
             inputs=[script_input, pdf_input, ref_audio, ref_text, cfg_slider, timesteps_slider, video_height,
                     clear_checkbox, preview_mode, preview_start, preview_end, output_name],
             outputs=[output_video, status_md],
+            show_progress="full",
+        )
+        add_queue_btn.click(
+            fn=add_to_queue,
+            inputs=[queue_state, script_input, pdf_input, ref_audio, ref_text, cfg_slider, timesteps_slider, video_height,
+                    clear_checkbox, preview_mode, preview_start, preview_end, output_name],
+            outputs=[queue_state, queue_md, status_md],
+        )
+        clear_queue_btn.click(
+            fn=clear_queue,
+            inputs=[queue_state],
+            outputs=[queue_state, queue_md, status_md],
+        )
+        submit_all_btn.click(
+            fn=submit_all_jobs,
+            inputs=[queue_state],
+            outputs=[queue_state, queue_md, output_video, status_md],
             show_progress="full",
         )
         check_btn.click(
