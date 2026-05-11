@@ -180,7 +180,9 @@ def run_job(job_id: str, work_dir: str, output_dir: str) -> None:
         sys.exit(1)
 
     cached_ref_latents = _encode_ref_audio(ref_wav)
+    cached_ref_text = ref_text
     print(f"Latents cached: {len(cached_ref_latents)} bytes")
+    print(f"Ref text: {cached_ref_text[:80]}{'...' if len(cached_ref_text) > 80 else ''}")
 
     # ── Load script ──
     with open(script_path) as f:
