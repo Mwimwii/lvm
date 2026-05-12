@@ -1,0 +1,8 @@
+gradio
+lightning-sdk
+boto3
+python-dotenv
+requests
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

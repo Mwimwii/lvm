@@ -1,0 +1,11 @@
+name = "lvm-youtube-uploader"
+main = "youtube-upload.js"
+compatibility_date = "2024-05-01"
+
+# Bind your R2 bucket (must match the bucket name in your Cloudflare account)
+[[r2_buckets]]
+binding = "VIDEOS"
+bucket_name = "vidai"
+
+[observability]
+enabled = false
